@@ -337,13 +337,11 @@ class TextTextTrainer(BaseTrainer):
         query_outputs = model(
             **padded_query_inputs,
             normalize=normalize,
-            output_hidden_states=True,
         )
         document_outputs = model(
             input_ids=batch["document_input_ids"].to(model.device),
             attention_mask=batch["document_attention_mask"].to(model.device),
             normalize=normalize,
-            output_hidden_states=True,
         )
         if "negative_input_ids" in batch:
             raise NotImplementedError("Negative sampling not supported for text-text models")
