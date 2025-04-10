@@ -327,11 +327,10 @@ class NomicBertEncoder(NomicBertPreTrainedModel):
         """
         hidden_states2 = None
         residual = None
-        all_hidden_states = []
 
         batch, seqlen = hidden_states.shape[:2]
         if not self.gradient_checkpointing and getattr(self.config, "moe_every_n_layers", 0) <= 0:
-            hidden_states, indices, cu_seqlens, max_seqlen_in_batch = unpad_input(hidden_states, attention_mask)[:4]
+            hidden_states, indices, cu_seqlens, max_seqlen_in_batch = unpad_input(hidden_states, attention_mask)
         else:
             indices, cu_seqlens, max_seqlen_in_batch = None, None, None
 
@@ -387,18 +386,13 @@ class NomicBertEncoder(NomicBertPreTrainedModel):
                     indices=indices,
                 )
 
-            all_hidden_states.append(pad_input(hidden_states, indices, batch, seqlen))
-
             if router_outputs is not None:
                 all_router_logits.append(router_outputs)   
             
         if indices is not None:
             hidden_states = pad_input(hidden_states, indices, batch, seqlen)
 
-        stacked_hidden_states = torch.stack(all_hidden_states)
-        del all_hidden_states
-
-        return hidden_states, all_router_logits, stacked_hidden_states
+        return hidden_states, all_router_logits
 
 
 class NomicBertPooler(nn.Module):
@@ -525,7 +519,6 @@ class NomicBertModel(NomicBertPreTrainedModel):
         token_type_ids=None,
         attention_mask=None,
         masked_tokens_mask=None,
-        output_hidden_states=None,
     ):
         """If masked_tokens_mask is not None (i.e. last_layer_subset == True in NomicBertForPreTraining),
         we only want the output for the masked tokens. This means that we only compute the last
@@ -549,8 +542,7 @@ class NomicBertModel(NomicBertPreTrainedModel):
         else:
             subset_mask = None
 
-        sequence_output, router_outputs, enc_hidden_states = self.encoder(hidden_states, attention_mask=attention_mask, output_hidden_states=output_hidden_states)
-        
+        sequence_output, router_outputs = self.encoder(hidden_states, attention_mask=attention_mask)
         if masked_tokens_mask is None:
             pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
         else:
@@ -587,7 +579,6 @@ class NomicBertModel(NomicBertPreTrainedModel):
             router_loss, tokens_per_expert = None, None
 
         return NomicBertMoEOutput(
-            hidden_states=enc_hidden_states,
             last_hidden_state=sequence_output,
             pooler_output=pooled_output,
             router_logits=router_outputs,
