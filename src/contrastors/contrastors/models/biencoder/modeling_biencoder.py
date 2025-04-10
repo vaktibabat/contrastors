@@ -284,7 +284,7 @@ class BiEncoder(PreTrainedModel):
         else:
             self.hamming = nn.Identity()
 
-    def forward(self, input_ids, attention_mask=None, is_padded_inputs=True, normalize=True, binarize=False, output_hidden_states=False, **kwargs):
+    def forward(self, input_ids, attention_mask=None, is_padded_inputs=True, normalize=True, binarize=False, **kwargs):
         context = torch.no_grad if self.frozen_trunk else nullcontext
         with context():
             trunk_output = self.trunk(input_ids, attention_mask=attention_mask, **kwargs)
@@ -296,8 +296,6 @@ class BiEncoder(PreTrainedModel):
             router_loss = trunk_output.router_loss
         if getattr(trunk_output, "tokens_per_expert", None) is not None:
             tokens_per_expert = trunk_output.tokens_per_expert
-        if getattr(trunk_output, "hidden_states", None) is not None:
-            hidden_states = trunk_output.hidden_states
 
         trunk_output = trunk_output[0]
 
@@ -314,17 +312,8 @@ class BiEncoder(PreTrainedModel):
         embedding = self.proj(embedding)
 
         if binarize:
-            if not output_hidden_states:
-                return {"embedding": (embedding > 0).float(), "router_logits": router_logits, "router_loss": router_loss, "tokens_per_expert": tokens_per_expert}
-            else:
-                return {"embedding": (embedding > 0).float(), "router_logits": router_logits, "router_loss": router_loss, "tokens_per_expert": tokens_per_expert, "hidden_states": hidden_states}
+            return {"embedding": (embedding > 0).float(), "router_logits": router_logits, "router_loss": router_loss, "tokens_per_expert": tokens_per_expert}
         elif normalize:
-            if not output_hidden_states:
-                return {"embedding": F.normalize(embedding, dim=-1), "router_logits": router_logits, "router_loss": router_loss, "tokens_per_expert": tokens_per_expert}
-            else:
-                return {"embedding": F.normalize(embedding, dim=-1), "router_logits": router_logits, "router_loss": router_loss, "tokens_per_expert": tokens_per_expert, "hidden_states": hidden_states}
+            return {"embedding": F.normalize(embedding, dim=-1), "router_logits": router_logits, "router_loss": router_loss, "tokens_per_expert": tokens_per_expert}
         else:
-            if not output_hidden_states:
-                return {"embedding": embedding, "router_logits": router_logits, "router_loss": router_loss, "tokens_per_expert": tokens_per_expert}
-            else: 
-                return {"embedding": embedding, "router_logits": router_logits, "router_loss": router_loss, "tokens_per_expert": tokens_per_expert, "hidden_states": hidden_states}
+            return {"embedding": embedding, "router_logits": router_logits, "router_loss": router_loss, "tokens_per_expert": tokens_per_expert}

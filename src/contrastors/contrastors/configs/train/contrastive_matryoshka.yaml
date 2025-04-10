@@ -4,14 +4,15 @@ train_args:
   weight_decay: 0.01
   warmup_steps: 400
   checkpoint: null
-  wandb: false
+  wandb: true
   wandb_project_name: "text-contrastors"
   wandb_entity: "gpt4all"
+  wandb_run_name: "nomic-embed-text-v1.5"
   log_grads_every: 100
   log_lr_every: 10
   save_every: 4500 
   chunk_size: 32
-  output_dir: "ckpts/nomic-embed-text-v1"
+  output_dir: "ckpts/nomic-embed-text-v1.5"
   # if using deepspeed, this will be ignored
   schedule_type: "linear"
   max_grad_norm: 1.0
@@ -22,6 +23,8 @@ train_args:
   use_fp8: false
   clamp_logits: false
   logit_max: 100
+  matryoshka_dims: [64, 128, 256, 512, 768]
+  matryoshka_loss_weights: [1, 1, 1, 1, 1]
 
 model_args:
   model_type: "encoder"
@@ -35,12 +38,13 @@ model_args:
   tokenizer_name: "bert-base-uncased"
   model_name: "nomic-ai/nomic-embed-text-v1-unsupervised"
   pretrained: true
+  hamming: true
 
 
 data_args:
   input_shards: "configs/data/finetune_triplets.yaml"
   workers: 8 
-  batch_size: 32
+  batch_size: 256
   seed: 42
   shuffle: false
   download: true
