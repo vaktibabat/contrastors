@@ -1,6 +1,6 @@
 train_args:
   num_epochs: 3 
-  learning_rate: 2.0e-5
+  learning_rate: 5.0e-5
   weight_decay: 0.01
   warmup_steps: 400
   checkpoint: null
@@ -22,8 +22,8 @@ train_args:
   use_fp8: false
   clamp_logits: false
   logit_max: 100
-  tuning_param: 200
-  zeta: 0.4
+  tuning_param: 0.75
+  zeta: 0.2
 
 model_args:
   model_type: "encoder"

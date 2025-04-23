@@ -24,6 +24,7 @@ train_args:
   logit_max: 100
   tuning_param: 200
   zeta: 0.4
+  lambda_decay_rate: 0.010
 
 model_args:
   model_type: "encoder"

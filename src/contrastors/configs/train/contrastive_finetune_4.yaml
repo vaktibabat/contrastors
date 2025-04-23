@@ -22,8 +22,9 @@ train_args:
   use_fp8: false
   clamp_logits: false
   logit_max: 100
-  tuning_param: 200
+  tuning_param: 25
   zeta: 0.4
+  lambda_decay_rate: 0.010
 
 model_args:
   model_type: "encoder"
