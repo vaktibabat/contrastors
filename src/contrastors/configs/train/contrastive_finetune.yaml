@@ -1,5 +1,5 @@
 train_args:
-  num_epochs: 1 
+  num_epochs: 3 
   learning_rate: 2.0e-5
   weight_decay: 0.01
   warmup_steps: 400
@@ -9,9 +9,9 @@ train_args:
   wandb_entity: "gpt4all"
   log_grads_every: 100
   log_lr_every: 10
-  save_every: 4500 
+  save_every: 100
   chunk_size: 32
-  output_dir: "ckpts/nomic-embed-text-v1"
+  output_dir: "ckpts/nomic-embed-text-v1-robust"
   # if using deepspeed, this will be ignored
   schedule_type: "linear"
   max_grad_norm: 1.0
@@ -22,6 +22,8 @@ train_args:
   use_fp8: false
   clamp_logits: false
   logit_max: 100
+  tuning_param: 200
+  zeta: 0.4
 
 model_args:
   model_type: "encoder"
@@ -33,13 +35,13 @@ model_args:
   add_prefix: true
   num_negatives: 7 
   tokenizer_name: "bert-base-uncased"
-  model_name: "nomic-ai/nomic-embed-text-v1-unsupervised"
+  model_name: "nomic-ai/nomic-embed-text-v1"
   pretrained: true
 
 
 data_args:
   input_shards: "configs/data/finetune_triplets.yaml"
-  workers: 8 
+  workers: 8
   batch_size: 32
   seed: 42
   shuffle: false

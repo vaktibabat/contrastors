@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import sys
 from abc import ABCMeta, abstractmethod
 from contextlib import contextmanager, nullcontext
 from functools import partial
@@ -23,6 +24,14 @@ from contrastors.dataset.text_text_loader import StreamingShardDataset
 from contrastors.distributed import DistributedWandbTracker, gather, print_rank_zero
 from contrastors.optimizer import configure_optimizer
 
+from IsoScore.IsoScore import *
+
+from src.benchmarking.robustness import RobustnessEvaluator
+from src.benchmarking.performance import PerformanceEvaluator
+from src.isotropy import MultiConceptIsotropyEvaluator
+
+from sentence_transformers import SentenceTransformer, models
+from sentence_transformers.models import Normalize
 
 class BaseTrainer(metaclass=ABCMeta):
     def __init__(self, config, dtype=torch.float32):
@@ -100,6 +109,13 @@ class BaseTrainer(metaclass=ABCMeta):
                 self.dataloaders["train"] = dataloader
             if lr_scheduler is not None:
                 self.scheduler = lr_scheduler
+
+        self.reg = istar()
+        self.concepts_to_eval = ["potter", "iphone", "vaccine"]
+        self.robustness_evals = {k: RobustnessEvaluator("nomic-ai/nomic-embed-text-v1", k) for k in self.concepts_to_eval}
+        self.perf_eval = PerformanceEvaluator("nomic-ai/nomic-embed-text-v1",)
+        self.iso_eval = MultiConceptIsotropyEvaluator(self.concepts_to_eval, "nomic-ai/nomic-embed-text-v1")
+
 
     def set_seed(self, seed):
         random.seed(seed)
@@ -295,7 +311,7 @@ class BaseTrainer(metaclass=ABCMeta):
 
         else:
             self.print(f"Loading model from {input_dir}/model")
-            # self.model["model"] = self.load_model(f"{input_dir}/model")
+            self.model["model"] = self.load_model(f"{input_dir}/model")
 
             self.print(f"Loading optimizer and scheduler state from {input_dir}/optimizer.pt")
             self.optimizer.load_state_dict(torch.load(f"{input_dir}/optimizer.pt"))
@@ -364,10 +380,13 @@ class BaseTrainer(metaclass=ABCMeta):
 
     @abstractmethod
     def training_step(
-        self, model, batch, optimizer, scheduler, step, train_args, total_num_steps, gradient_accumulation_steps
+        self, model, batch, optimizer, scheduler, step, train_args, total_num_steps, gradient_accumulation_steps, query_C0, doc_C0
     ):
-        with torch.autocast(device_type="cuda", dtype=self.dtype, enabled=(not self.deepspeed and not self.config.train_args.grad_cache)):
-            loss = self.forward_step(inputs=batch, **model, step=step)
+        for param in model["model"].parameters():
+            param.requires_grad = True
+
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=(not self.deepspeed and not self.config.train_args.grad_cache)):
+            loss = self.forward_step(inputs=batch, **model, step=step, query_C0=query_C0, doc_C0=doc_C0)
 
         self.backward(loss)
 
@@ -390,6 +409,39 @@ class BaseTrainer(metaclass=ABCMeta):
             model_to_update = ema_getter(model)
             self.model["ema"].update(model_to_update)
 
+        # Log every 25 steps
+        if step % 25 == 0:
+            bi_encoder = model["model"].module
+
+            # Build SentenceTransformer
+            sentence_model = SentenceTransformer("nomic-ai/nomic-embed-text-v1", trust_remote_code=True)
+            sentence_model[0].auto_model = bi_encoder.trunk
+            
+            iso_results = self.iso_eval.evaluate(model["model"], sentence_model)
+            robustness_results = {concept: self.robustness_evals[concept].evaluate(sentence_model) for concept in self.concepts_to_eval}
+            ndcg = self.perf_eval.evaluate(sentence_model)
+
+            to_log = {"step": step, "ndcg@10": ndcg}
+
+            for concept in self.concepts_to_eval:
+                to_log[f"{concept}_appeared@10"] = robustness_results[concept][0]
+                to_log[f"{concept}_mean_cos_sim"] = robustness_results[concept][1]
+
+            to_log["general_cosreg"] = iso_results["general_cosreg"]
+            to_log["general_isoscore"] = iso_results["general_isoscore"]
+
+            for concept in self.concepts_to_eval: 
+                to_log[f"{concept}_cosreg"] = iso_results[f"{concept}_cosreg"]
+                to_log[f"{concept}_isoscore"] = iso_results[f"{concept}_isoscore"]
+
+            wandb.log(to_log)
+    
+            sentence_model.train()
+            model["model"].train()
+
+        if step == 25 * 50:
+            sys.exit(0)
+
         return loss
 
     def train(self):
@@ -400,6 +452,7 @@ class BaseTrainer(metaclass=ABCMeta):
         train_dataloader = dataloaders["train"]
         val_dataloader = dataloaders.get("val", None)
 
+        self.model["model"] = self.model["model"].to(torch.bfloat16)
         model = self.model
         optimizer = self.optimizer
         scheduler = self.scheduler
@@ -424,6 +477,8 @@ class BaseTrainer(metaclass=ABCMeta):
 
         self.print(f"Starting training from epoch {start_epoch}, step {initial_step=}")
         for epoch in range(start_epoch, train_args.num_epochs):
+            self.save_model(f"/home/sharifm/students/yorayh/nomic_models_multi_gpu/nomic_{epoch}_0.25_0.2")
+
             if epoch > 0 and getattr(data_config, "streaming", False) is False:
                 # webdataset needs special handling for multi-epoch
                 if "train_sampler" in dataloaders:
@@ -440,7 +495,13 @@ class BaseTrainer(metaclass=ABCMeta):
                 temp_config.data_args.seed = data_config.seed + epoch
                 train_dataloader = self.get_dataloaders(temp_config, epoch=epoch)["train"]
 
-            self.print(f"Total training steps: {total_training_steps}")
+            self.print(f"Total training steps: {total_training_steps}; before computing shrinkage matrix")
+
+            self.print("before computing shrinkage matrix")
+
+            # Compute C0 matrix for I-STAR
+            # (768, 768) matrices
+            query_C0, doc_C0 = compute_shrinkage_matrix(train_dataloader, model["model"])
 
             progbar = tqdm(
                 train_dataloader, desc=f"Epoch {epoch}", disable=not self.global_rank == 0, total=total_training_steps, initial=initial_step
@@ -477,7 +538,11 @@ class BaseTrainer(metaclass=ABCMeta):
                         train_args,
                         total_training_steps,
                         gradient_accumulation_steps,
+                        query_C0,
+                        doc_C0,
                     )
+
+
 
                     if self.profile:
                         p.step()
@@ -496,6 +561,7 @@ class BaseTrainer(metaclass=ABCMeta):
                         self.log({k: torch.mean(v).item() for k, v in metrics.items()}, step=curr_step)
                     else:
                         self.print(f'Loss: { {k: torch.mean(v).item() for k, v in metrics.items()} }')
+                        #self.print(f"IsoScore*: {metrics['avg_batch_iso']}")
                         # only print every gradient accumulation steps
                         if step % gradient_accumulation_steps == 0 and step > 0 or step == total_training_steps - 1:
                             self.print(f"LR: {scheduler.get_last_lr()[0]}")
@@ -531,3 +597,50 @@ class BaseTrainer(metaclass=ABCMeta):
         if train_args.num_epochs > 1 and train_args.save_every > 0:
             torch.distributed.barrier()
             self.save_model(f"{train_args.output_dir}/final_model")
+
+# Compute the shrinkage matrix $\Sigma_{S_i}$ at epoch i
+# slightly modified version of get_ci from https://github.com/bcbi-edu/p_eickhoff_isoscore/blob/main/I-STAR/training_utils.py#L40
+def compute_shrinkage_matrix(data, model, max_points=250000):
+    """Given the data and model of interest, generate a sample of size max_points,
+    then calculate the covariance matrix. Run this as a warmup to generate a stable
+    covariance matrix for IsoScore Regularization"""
+    num_points = 0
+    # We compute C0 for both the queries and the documents
+    query_point_list = []
+    doc_point_list = []
+    model.eval()
+    h = 768
+
+    for idx, batch in enumerate(data):
+        # send batch to device
+        batch = {key: value.to(device=model.device, dtype=torch.int64) for key, value in batch.items() if isinstance(value, torch.Tensor)}
+
+        # Set model to eval and run input batches with no_grad to disable gradient calculations
+        with torch.no_grad():        
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                query_outputs = model(input_ids=batch["query_input_ids"], attention_mask=batch["query_attention_mask"], normalize=False, output_hidden_states=True)["hidden_states"]
+                doc_outputs = model(input_ids=batch["document_input_ids"], attention_mask=batch["document_attention_mask"], normalize=False, output_hidden_states=True)["hidden_states"]
+
+            query_points = torch.reshape(query_outputs, (-1,h))
+            doc_points = torch.reshape(doc_outputs, (-1,h))
+
+        # We can track the # of points for both the queries and the documents with the same variable
+        num_points += query_points.shape[0]
+
+       # Collect the last state representations to a list and keep track of the number of points
+        query_points = query_points.to(torch.float32).detach().cpu().numpy()
+        doc_points = doc_points.to(torch.float32).detach().cpu().numpy()
+
+        query_point_list.append(query_points)
+        doc_point_list.append(doc_points)
+
+        if num_points > max_points:
+            break
+    # Convert model back to train mode:
+    model.train()
+    # Stack the points and calclate the sample covariance C0
+    query_sample, doc_sample = np.vstack(query_point_list), np.vstack(doc_point_list)
+    query_C0, doc_C0 = np.cov(query_sample.T), np.cov(doc_sample.T)
+
+    return torch.tensor(query_C0, device=model.device), torch.tensor(doc_C0, device=model.device)
+

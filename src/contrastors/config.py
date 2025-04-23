@@ -45,6 +45,9 @@ class TrainArgs(BaseModel):
     router_aux_loss_coef: Optional[float] = 0.001
     distill_loss_fn: Optional[str] = "mse"
     distill_temperature: Optional[float] = 1.0
+    tuning_param: float = 100
+    zeta: float = 0.4
+    lambda_decay_rate: float = 0.1
 
     @field_validator('logit_max')
     @classmethod

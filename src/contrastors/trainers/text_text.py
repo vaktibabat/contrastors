@@ -20,6 +20,10 @@ from .base import BaseTrainer
 from torch import nn
 from typing import List, Dict, Union, Tuple
 
+from IsoScore.IsoScore import *
+
+import math
+
 class SentenceTransformerModule(nn.Module):
     """
     Wrapper class to make a custom embedding model compatible with SentenceTransformers.
@@ -135,6 +139,13 @@ class TextTextTrainer(BaseTrainer):
             )
         else:
             self.matryoshka_loss_weights = None
+        self.reg = istar()
+        self.tuning_param = config.train_args.tuning_param
+        self.zeta = config.train_args.zeta
+        #self.tuning_param = 50
+        #self.zeta = 0.4
+        #self.lambda_decay_rate = 0.010
+        self.lambda_decay_rate = config.train_args.lambda_decay_rate
 
     def get_model(self, config):
         model_config = config.model_args
@@ -273,7 +284,7 @@ class TextTextTrainer(BaseTrainer):
     def clip_gradients(self, max_grad_norm):
         super().clip_gradients(max_grad_norm)
 
-    def forward_step(self, model, inputs, logit_scale, **kwargs):
+    def forward_step(self, model, inputs, logit_scale, step, **kwargs):
         model.train()
         if self.use_grad_cache:
             loss = self._grad_cache_forward_step(model, inputs, logit_scale, **kwargs)
@@ -284,6 +295,7 @@ class TextTextTrainer(BaseTrainer):
                 logit_scale=logit_scale,
                 matryoshka_dims=self.matryoshka_dims,
                 matroyshka_loss_weights=self.matryoshka_loss_weights,
+                step=step,
                 **kwargs,
             )
 
@@ -321,7 +333,9 @@ class TextTextTrainer(BaseTrainer):
         )
         return {"loss": loss}
 
-    def _forward_step(self, model, batch, logit_scale, matryoshka_dims=None, matroyshka_loss_weights=None, **kwargs):
+    def _forward_step(self, model, batch, logit_scale, matryoshka_dims=None, matroyshka_loss_weights=None, query_C0=None, doc_C0=None, step=0, **kwargs):
+        model.train()
+
         normalize = True if matryoshka_dims is None else False
         dataset_name = batch.pop("dataset_name")
         if self.config.model_args.num_experts > 0 and self.config.train_args.router_aux_loss_coef > 0:
@@ -329,6 +343,7 @@ class TextTextTrainer(BaseTrainer):
             moe.clear_load_balancing_loss()
 
         max_length = batch["document_input_ids"].shape[1] 
+        
         padded_query_inputs = {
                 "input_ids": batch["query_input_ids"].to(model.device), 
                 "attention_mask": batch["query_attention_mask"].to(model.device),
@@ -379,6 +394,8 @@ class TextTextTrainer(BaseTrainer):
                 **kwargs,
             )
 
+        aux_loss = 0
+
         if self.config.model_args.num_experts > 0 and self.config.train_args.router_aux_loss_coef > 0:
             if query_outputs["router_loss"] is not None and document_outputs["router_loss"] is not None:
                 # megablocks scales loss already
@@ -422,14 +439,27 @@ class TextTextTrainer(BaseTrainer):
                 # aux_loss = gradnorm(aux_loss)
 
             # loss = gradnorm(loss)
-            total_loss = loss + aux_loss
+            loss = loss + aux_loss
+        
+        # Add the I-STAR loss
+        query_points = torch.reshape(query_outputs["hidden_states"], (-1, 768))
+        doc_points = torch.reshape(document_outputs["hidden_states"], (-1, 768))
 
-            loss = {"loss": total_loss, "aux_loss": aux_loss, "infonce_loss": loss}
+        query_batch_iso = self.reg.IsoScore_star(query_points, query_C0, zeta=self.zeta, gpu_id=self.process_index, is_eval=False)
+        doc_batch_iso = self.reg.IsoScore_star(doc_points, doc_C0, zeta=self.zeta, gpu_id=self.process_index, is_eval=False)
+        avg_batch_iso = (query_batch_iso + doc_batch_iso) / 2
+            
+        total_loss = loss + self.tuning_param * (1 - avg_batch_iso) 
 
-        return loss
+        if step % 25 == 0:
+            self.tuning_param *= math.exp(-self.lambda_decay_rate)
+
+        #loss_dict = {"loss": total_loss, "aux_loss": aux_loss, "infonce_loss": total_loss, "avg_batch_iso": avg_batch_iso}
+
+        return total_loss
 
     def training_step(
-        self, model, batch, optimizer, scheduler, step, train_args, total_num_steps, gradient_accumulation_steps
+        self, model, batch, optimizer, scheduler, step, train_args, total_num_steps, gradient_accumulation_steps, query_C0, doc_C0
     ):
         loss = super().training_step(
             model=model,
@@ -440,6 +470,8 @@ class TextTextTrainer(BaseTrainer):
             train_args=train_args,
             total_num_steps=total_num_steps,
             gradient_accumulation_steps=gradient_accumulation_steps,
+            query_C0=query_C0,
+            doc_C0=doc_C0,
         )
 
         if train_args.clamp_logits:
@@ -471,4 +503,3 @@ class TextTextTrainer(BaseTrainer):
             
             
         torch.distributed.barrier()
-            
