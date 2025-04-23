@@ -158,9 +158,6 @@ class NomicBertPreTrainedModel(PreTrainedModel):
 
             if ignore_mismatched_shapes:
                 state_dict = filter_shapes(state_dict, model)
-
-            state_dict = {k[len("trunk."):]: v for k, v in state_dict.items()}
-
             load_return = model.load_state_dict(state_dict, strict=False)
         else:
             # TODO: can probably check config class and see if we need to remap from a bert model
@@ -172,7 +169,6 @@ class NomicBertPreTrainedModel(PreTrainedModel):
                 remove_cls_weights=remove_cls,
                 add_pooling_layer=getattr(config, "add_pooling_layer", False),
             )
-            
             if ignore_mismatched_shapes:
                 state_dict = filter_shapes(state_dict, model)
 
@@ -264,7 +260,6 @@ class NomicBertPreTrainedModel(PreTrainedModel):
                 else:
                     raise ValueError(f"Unsupported moe_impl: {moe_impl}")
                 strict = False
-
             load_return = model.load_state_dict(state_dict, strict=strict)
 
             if getattr(config, "num_experts", 0) > 0:
@@ -276,8 +271,8 @@ class NomicBertPreTrainedModel(PreTrainedModel):
 
                 all_missing = set(router_keys + bias_keys)
                 assert set(load_return.missing_keys) - all_missing == set(), f"Missing keys: {set(load_return.missing_keys) - all_missing}"
+                
         logger.warning(load_return)
-
         return model
 
     def _set_gradient_checkpointing(self, module, value=False):
@@ -332,11 +327,10 @@ class NomicBertEncoder(NomicBertPreTrainedModel):
         """
         hidden_states2 = None
         residual = None
-        all_hidden_states = []
 
         batch, seqlen = hidden_states.shape[:2]
         if not self.gradient_checkpointing and getattr(self.config, "moe_every_n_layers", 0) <= 0:
-            hidden_states, indices, cu_seqlens, max_seqlen_in_batch = unpad_input(hidden_states, attention_mask)[:4]
+            hidden_states, indices, cu_seqlens, max_seqlen_in_batch = unpad_input(hidden_states, attention_mask)
         else:
             indices, cu_seqlens, max_seqlen_in_batch = None, None, None
 
@@ -371,8 +365,6 @@ class NomicBertEncoder(NomicBertPreTrainedModel):
                 )
 
             else:
-                hidden_states = hidden_states.to(torch.bfloat16)
-
                 hidden_states, hidden_states2, residual, router_outputs = layer(
                     hidden_states,
                     hidden_states2,
@@ -394,19 +386,13 @@ class NomicBertEncoder(NomicBertPreTrainedModel):
                     indices=indices,
                 )
 
-            all_hidden_states.append(pad_input(hidden_states, indices, batch, seqlen))
-
             if router_outputs is not None:
                 all_router_logits.append(router_outputs)   
             
         if indices is not None:
             hidden_states = pad_input(hidden_states, indices, batch, seqlen)
 
-        stacked_hidden_states = torch.stack(all_hidden_states)
-
-        del all_hidden_states
-
-        return hidden_states, all_router_logits, stacked_hidden_states
+        return hidden_states, all_router_logits
 
 
 class NomicBertPooler(nn.Module):
@@ -521,8 +507,8 @@ class NomicBertModel(NomicBertPreTrainedModel):
         self.embeddings = BertEmbeddings(config)
         self.emb_drop = nn.Dropout(config.resid_pdrop)
         self.emb_ln = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
-        self.encoder = NomicBertEncoder(config).half()
-        self.pooler = NomicBertPooler(config).half() if add_pooling_layer else None
+        self.encoder = NomicBertEncoder(config)
+        self.pooler = NomicBertPooler(config) if add_pooling_layer else None
 
         self.apply(partial(_init_weights, initializer_range=config.initializer_range))
 
@@ -533,19 +519,13 @@ class NomicBertModel(NomicBertPreTrainedModel):
         token_type_ids=None,
         attention_mask=None,
         masked_tokens_mask=None,
-        output_hidden_states=None,
-        return_dict=None,
     ):
         """If masked_tokens_mask is not None (i.e. last_layer_subset == True in NomicBertForPreTraining),
         we only want the output for the masked tokens. This means that we only compute the last
         layer output for these tokens.
         masked_tokens_mask: (batch, seqlen), dtype=torch.bool
         """
-        #input_ids = input_ids.to(torch.device("cuda"))
-        #attention_mask = attention_mask.to(torch.device("cuda"))
-
-        hidden_states = self.embeddings(input_ids, position_ids=position_ids, token_type_ids=token_type_ids).to(torch.bfloat16)
-       
+        hidden_states = self.embeddings(input_ids, position_ids=position_ids, token_type_ids=token_type_ids)
         # TD [2022-12:18]: Don't need to force residual in fp32
         # BERT puts embedding LayerNorm before embedding dropout.
         if not self.fused_dropout_add_ln:
@@ -562,9 +542,7 @@ class NomicBertModel(NomicBertPreTrainedModel):
         else:
             subset_mask = None
 
-        sequence_output, router_outputs, enc_hidden_states = self.encoder(hidden_states, attention_mask=attention_mask.to(torch.bfloat16), output_hidden_states=output_hidden_states)
-        sequence_output, router_outputs, enc_hidden_states = self.encoder(hidden_states, attention_mask=attention_mask, output_hidden_states=output_hidden_states)
-        
+        sequence_output, router_outputs = self.encoder(hidden_states, attention_mask=attention_mask)
         if masked_tokens_mask is None:
             pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
         else:
@@ -601,7 +579,6 @@ class NomicBertModel(NomicBertPreTrainedModel):
             router_loss, tokens_per_expert = None, None
 
         return NomicBertMoEOutput(
-            hidden_states=enc_hidden_states,
             last_hidden_state=sequence_output,
             pooler_output=pooled_output,
             router_logits=router_outputs,

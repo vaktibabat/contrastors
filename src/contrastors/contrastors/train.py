@@ -10,10 +10,6 @@ from contrastors.read import read_config
 from contrastors.trainers import TRAINER_REGISTRY
 import datetime
 
-import wandb
-import hydra
-from omegaconf import DictConfig
-
 logger = logging.getLogger('s3fs')
 logger.setLevel(logging.DEBUG)  # Set the logging level to DEBUG
 
@@ -97,22 +93,6 @@ def update_config_with_args(config, args):
                     setattr(group_args, key, value)
     return config
 
-def main(cfg, dtype):
-    wandb.init(
-        # Set the wandb entity where your project will be logged (generally your team name).
-        entity="yoray-herzberg-n-a",
-        # Set the wandb project where this run will be logged.
-        project="nomic_finetune",
-        # Track hyperparameters and run metadata.
-        config={
-            "lr": cfg.train_args.learning_rate,
-            "lambda": cfg.train_args.tuning_param,
-            "zeta": cfg.train_args.zeta,
-            "lambda_decay_rate": cfg.train_args.lambda_decay_rate,
-        },
-    )
-
-    model_type = cfg.model_args.model_type
 
 def main(config, dtype):
     model_type = config.model_args.model_type
@@ -121,13 +101,9 @@ def main(config, dtype):
 
     dtype = DTYPE_MAPPING[dtype]
 
-    trainer = trainer_cls(cfg, dtype)
-    trainer.train()
-
-    wandb.finish()
-
     trainer = trainer_cls(config, dtype)
     trainer.train()
+
 
 if __name__ == "__main__":
     args = parse_args()
